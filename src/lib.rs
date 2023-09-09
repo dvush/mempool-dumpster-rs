@@ -1,13 +1,17 @@
+use async_zip::base::read::stream::ZipFileReader;
+use csv_async::StringRecord;
+use futures::{io, StreamExt, TryStreamExt};
 use polars::frame::DataFrame;
 use polars::prelude::{NamedFrom, ParquetCompression, ParquetWriter, Series};
 use rayon::prelude::*;
 use reth_primitives::{Bytes, TransactionSigned};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::fs::File;
-use std::io::Cursor;
+use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
-use tracing::info;
+use tracing::{debug, info, warn};
 
 // There are 3 types of files:
 // - sourcelog: contains the source of the transaction
@@ -34,11 +38,10 @@ fn path_transactions(data_dir: impl AsRef<Path>, day: &str) -> PathBuf {
         .join(format!("{}_transactions.parquet", day))
 }
 
-async fn get_month_list() -> eyre::Result<Vec<String>> {
-    let resp = reqwest::get("https://mempool-dumpster.flashbots.net/index.html")
-        .await?
-        .text()
-        .await?;
+fn get_month_list() -> eyre::Result<Vec<String>> {
+    let resp = ureq::get("https://mempool-dumpster.flashbots.net/index.html")
+        .call()?
+        .into_string()?;
 
     let fragment = scraper::Html::parse_document(&resp);
     let selector = scraper::Selector::parse("ul.root-months li a").unwrap();
@@ -55,14 +58,13 @@ async fn get_month_list() -> eyre::Result<Vec<String>> {
     }
 }
 
-async fn get_days(month: &str) -> eyre::Result<Vec<String>> {
-    let resp = reqwest::get(format!(
+fn get_days(month: &str) -> eyre::Result<Vec<String>> {
+    let resp = ureq::get(&format!(
         "https://mempool-dumpster.flashbots.net/ethereum/mainnet/{}/index.html",
         month
     ))
-    .await?
-    .text()
-    .await?;
+    .call()?
+    .into_string()?;
 
     let fragment = scraper::Html::parse_document(&resp);
     let selector = scraper::Selector::parse("table.pure-table tbody tr.c1 td.fn a").unwrap();
@@ -83,15 +85,54 @@ async fn get_days(month: &str) -> eyre::Result<Vec<String>> {
     }
 }
 
+fn download_zip_csv_records<R: DeserializeOwned>(url: &str) -> eyre::Result<Vec<R>> {
+    debug!("Downloading .zip.csv from {}", url);
+
+    // we download the file in memory because its small and zip::ZipArchive requires a Seek + Read
+    let mut response_bytes = Vec::new();
+    let read_bytes = ureq::get(url)
+        .call()?
+        .into_reader()
+        .read_to_end(&mut response_bytes)?;
+    debug!("Downloaded {} bytes", read_bytes);
+
+    let mut zip = {
+        let zip = Cursor::new(response_bytes);
+        let mut archive = zip::ZipArchive::new(zip)?;
+        archive
+    };
+
+    let mut csv = {
+        // we only have one file in the zip
+        let file = zip.by_index(0)?;
+        csv::Reader::from_reader(file)
+    };
+
+    let mut result = Vec::new();
+    for record in csv.deserialize() {
+        let record: R = match record {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("Failed to deserialize record: {}", e);
+                continue;
+            }
+        };
+        result.push(record)
+    }
+    debug!("Read {} records", result.len());
+
+    Ok(result)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 struct SourcelogCSVRecord {
-    timestamp_ms: u64,
+    timestamp_ms: i64,
     hash: String,
     source: String,
 }
 
 // downloads the sourcelog file for the given day and convert it to parquet format
-async fn download_sourcelog_file(data_dir: impl AsRef<Path>, day: &str) -> eyre::Result<()> {
+fn download_sourcelog_file(data_dir: impl AsRef<Path>, day: &str) -> eyre::Result<()> {
     info!("Downloading sourcelog file for {}", day);
 
     let file_path = path_source_log(data_dir, day);
@@ -108,43 +149,12 @@ async fn download_sourcelog_file(data_dir: impl AsRef<Path>, day: &str) -> eyre:
     let month = get_month(day);
 
     let url = format!(
-        "https://mempool-dumpster.flashbots.net/ethereum/mainnet/{}/{}_sourcelog.csv.zip",
+        // "https://mempool-dumpster.flashbots.net/ethereum/mainnet/{}/{}_sourcelog.csv.zip",
+        "http://localhost:8000/{}/{}_sourcelog.csv.zip",
         month, day
     );
-    // let resp = reqwest::get(&url).await?.bytes().await?;
-    let resp = fs::read("tmp/2023-09-07_sourcelog.csv.zip")?;
-    info!("Downloaded {} bytes", resp.len());
 
-    let mut zip = {
-        let zip = Cursor::new(resp);
-        let mut archive = zip::ZipArchive::new(zip)?;
-        archive
-    };
-    let mut csv = {
-        let file = zip.by_index(0)?;
-        csv::Reader::from_reader(file)
-    };
-
-    let mut records = Vec::new();
-    if !csv.has_headers() {
-        csv.set_headers(csv::StringRecord::from(vec![
-            "timestamp_ms",
-            "hash",
-            "source",
-        ]));
-    }
-    for result in csv.deserialize() {
-        let record: SourcelogCSVRecord = match result {
-            Ok(r) => r,
-            Err(e) => {
-                info!("Failed to deserialize record: {}", e);
-                continue;
-            }
-        };
-        records.push(record);
-    }
-
-    info!("Read {} records", records.len());
+    let records = download_zip_csv_records::<SourcelogCSVRecord>(&url)?;
 
     let mut df = DataFrame::new(vec![
         Series::new(
@@ -191,7 +201,7 @@ struct TransactionDataCSVRecord {
 }
 
 // downloads the sourcelog file for the given day and convert it to parquet format
-async fn download_transaction_data_file(data_dir: impl AsRef<Path>, day: &str) -> eyre::Result<()> {
+fn download_transaction_data_file(data_dir: impl AsRef<Path>, day: &str) -> eyre::Result<()> {
     info!("Downloading transaction file for {}", day);
 
     let file_path = path_transaction_data(data_dir, day);
@@ -208,53 +218,28 @@ async fn download_transaction_data_file(data_dir: impl AsRef<Path>, day: &str) -
     let month = get_month(day);
 
     let url = format!(
-        "https://mempool-dumpster.flashbots.net/ethereum/mainnet/{}/{}.csv.zip",
+        // "https://mempool-dumpster.flashbots.net/ethereum/mainnet/{}/{}.csv.zip",
+        "http://localhost:8000/{}/{}.csv.zip",
         month, day
     );
-    // let resp = reqwest::get(&url).await?.bytes().await?;
-    let resp = fs::read("tmp/2023-08-08.csv.zip")?;
-    info!("Downloaded {} bytes", resp.len());
-
-    let mut zip = {
-        let zip = Cursor::new(resp);
-        let mut archive = zip::ZipArchive::new(zip)?;
-        archive
-    };
-    let mut csv = {
-        let file = zip.by_index(0)?;
-        csv::Reader::from_reader(file)
-    };
-
-    let mut records = Vec::new();
-    if !csv.has_headers() {
-        csv.set_headers(csv::StringRecord::from(vec![
-            "timestamp_ms",
-            "hash",
-            "chain_id",
-            "from",
-            "to",
-            "value",
-            "nonce",
-            "gas",
-            "gas_price",
-            "gas_tip_cap",
-            "gas_fee_cap",
-            "data_size",
-            "data_4bytes",
-        ]));
-    }
-    for result in csv.deserialize() {
-        let record: TransactionDataCSVRecord = match result {
-            Ok(r) => r,
-            Err(e) => {
-                info!("Failed to deserialize record: {}", e);
-                continue;
-            }
-        };
-        records.push(record);
-    }
-
-    info!("Read {} records", records.len());
+    // if !csv.has_headers() {
+    //     csv.set_headers(csv::StringRecord::from(vec![
+    //         "timestamp_ms",
+    //         "hash",
+    //         "chain_id",
+    //         "from",
+    //         "to",
+    //         "value",
+    //         "nonce",
+    //         "gas",
+    //         "gas_price",
+    //         "gas_tip_cap",
+    //         "gas_fee_cap",
+    //         "data_size",
+    //         "data_4bytes",
+    //     ]));
+    // }
+    let records = download_zip_csv_records::<TransactionDataCSVRecord>(&url)?;
 
     let mut df = DataFrame::new(vec![
         Series::new(
@@ -349,41 +334,51 @@ mod tests {
     use super::*;
     use tracing_subscriber::filter::FilterExt;
 
-    #[tokio::test]
-    async fn test_get_month_list() {
-        let month = get_month_list().await.expect("failed to get month list");
+    #[test]
+    fn test_get_month_list() {
+        let month = get_month_list().expect("failed to get month list");
         assert!(month.iter().find(|m| *m == "2023-08").is_some());
         assert!(month.iter().find(|m| *m == "2023-09").is_some());
     }
 
-    #[tokio::test]
-    async fn test_get_days_list() {
-        let days = get_days("2023-08").await.expect("failed to get day list");
+    #[test]
+    fn test_get_days_list() {
+        let days = get_days("2023-08").expect("failed to get day list");
         assert!(days.iter().find(|m| *m == "2023-08-08").is_some());
         assert!(days.iter().find(|m| *m == "2023-08-31").is_some());
     }
 
     #[ignore]
-    #[tokio::test]
-    async fn test_download_sourcelog_file() {
+    #[test]
+    fn test_download_sourcelog_file() {
         let env = tracing_subscriber::EnvFilter::builder()
-            .parse("info")
+            .parse("mempool_dumpster=debug")
             .unwrap();
         tracing_subscriber::fmt().with_env_filter(env).init();
 
-        download_sourcelog_file("data", "2023-08-31").await.unwrap();
+        download_sourcelog_file("data", "2023-08-31").unwrap();
     }
 
     #[ignore]
-    #[tokio::test]
-    async fn test_download_transaction_data_file() {
+    #[test]
+    fn test_download_transaction_data_file() {
         let env = tracing_subscriber::EnvFilter::builder()
-            .parse("info")
+            .parse("debug")
             .unwrap();
         tracing_subscriber::fmt().with_env_filter(env).init();
 
-        download_transaction_data_file("data", "2023-08-31")
-            .await
+        download_transaction_data_file("data", "2023-09-01").unwrap();
+    }
+
+    #[test]
+    fn test_download_zip_csv_records_sync() {
+        let env = tracing_subscriber::EnvFilter::builder()
+            .parse("debug")
             .unwrap();
+        tracing_subscriber::fmt().with_env_filter(env).init();
+
+        let url = "http://localhost:8000/2023-09-01.csv.zip";
+        let record: Vec<TransactionDataCSVRecord> = download_zip_csv_records(url).unwrap();
+        dbg!(&record.len());
     }
 }
