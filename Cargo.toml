@@ -2,23 +2,22 @@
 name = "mempool-dumpster"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
+description = "Tool to get histrorical mempool data for Ethereum from mempool-dumpster"
+categories = ["command-line-utilities", "blockchain", "ethereum"]
+repository = "https://github.com/dvush/mempool-dumpster-rs/"
+readme = "README.md"
 
 [dependencies]
-async_zip = { version = "0.0.15", features = ["async-compression", "full"] }
 chrono = "0.4.30"
+clap = { version = "4.4.2", features = ["derive", "env"] }
 csv = "1.2.2"
-csv-async = { version = "1.2.6"}
 eyre = "0.6.8"
-futures = "0.3.28"
-polars = { version = "0.32.1", features = ["parquet"] }
-rayon = "1.7.0"
-reqwest = { version = "0.11.20", features = ["stream"] }
-reth-primitives = { git = "https://github.com/paradigmxyz/reth", version = "0.1.0-alpha.8" }
-rlp = "0.5.2"
+indicatif = "0.17.6"
+polars = { version = "0.32.1", features = ["parquet", "lazy"] }
 scraper = "0.17.1"
 serde = "1.0.188"
-tokio = { version = "1.32.0", features = ["full"] }
-tokio-util = { version = "0.7.8", features = ["io"] }
+thiserror = "1.0.48"
 tracing = "0.1.37"
 tracing-subscriber = { version = "0.3.17", features = ["env-filter"] }
 ureq = "2.7.1"
