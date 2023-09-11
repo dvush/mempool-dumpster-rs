@@ -117,12 +117,6 @@ impl Config {
     pub fn download_transaction_file(&self, day: &str) -> eyre::Result<()> {
         info!("Downloading transaction file for {}", day);
 
-        let date = chrono::NaiveDate::parse_from_str(day, "%Y-%m-%d")?;
-        // if before 2023-09-09 - fail
-        if date < chrono::NaiveDate::from_ymd_opt(2023, 9, 9).unwrap() {
-            return Err(eyre::eyre!("Transactions file is only available after 2023-09-09, check github for new version maybe its fixed"));
-        }
-
         let file_path = path_transactions(&self.data_dir, day);
         let skip = self.check_file(&file_path)?;
         if skip {
@@ -133,24 +127,26 @@ impl Config {
 
         let url = format!("{}/{}/{}.parquet", self.base_url, month, day);
 
-        let mut file = fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(&file_path)?;
-
         let reader = ureq::get(&url).call()?.into_reader();
         let mut reader: Box<dyn Read> = if self.progress {
             Box::new(
                 progress_bar_template()
-                    .with_message(format!("Downloading file: {}", file_path.display()))
+                    .with_message(format!("Downloading file: {}.parquet", day))
                     .wrap_read(reader),
             )
         } else {
             Box::new(reader)
         };
 
-        std::io::copy(&mut reader, &mut file)?;
+        let mut buffer = Vec::new();
+        reader.read_to_end(&mut buffer)?;
+
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&file_path)?;
+        file.write_all(&buffer)?;
 
         Ok(())
     }
@@ -476,20 +472,23 @@ fn download_zip_csv_records<R: DeserializeOwned>(
     debug!("Downloading .zip.csv from {}", url);
 
     // we download the file in memory because its small and zip::ZipArchive requires a Seek + Read
-    let mut response_bytes = Vec::new();
+    let response_bytes = {
+        let mut response_bytes = Vec::new();
 
-    let mut reader = ureq::get(url).call()?.into_reader();
-    let mut read: Box<dyn Read> = if progress {
-        Box::new(
-            progress_bar_template()
-                .with_message("Downloading ")
-                .wrap_read(&mut reader),
-        )
-    } else {
-        Box::new(reader)
+        let mut reader = ureq::get(url).call()?.into_reader();
+        let mut read: Box<dyn Read> = if progress {
+            Box::new(
+                progress_bar_template()
+                    .with_message("Downloading ")
+                    .wrap_read(&mut reader),
+            )
+        } else {
+            Box::new(reader)
+        };
+        let read_bytes = read.read_to_end(&mut response_bytes)?;
+        debug!("Downloaded {} bytes", read_bytes);
+        response_bytes
     };
-    let read_bytes = read.read_to_end(&mut response_bytes)?;
-    debug!("Downloaded {} bytes", read_bytes);
 
     let mut zip = {
         let zip = Cursor::new(response_bytes);
@@ -523,7 +522,7 @@ fn download_zip_csv_records<R: DeserializeOwned>(
         result.push(record)
     }
     if progress {
-        progress_bar.finish_and_clear();
+        progress_bar.finish();
     }
 
     debug!("Read {} records", result.len());

@@ -1,6 +1,6 @@
 [package]
 name = "mempool-dumpster"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 license = "MIT"
 description = "Tool to get histrorical mempool data for Ethereum from mempool-dumpster"
