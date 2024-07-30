@@ -14,7 +14,7 @@ clap = { version = "4.4.2", features = ["derive", "env"] }
 csv = "1.2.2"
 eyre = "0.6.8"
 indicatif = "0.17.6"
-polars = { version = "0.32.1", features = ["parquet", "lazy"] }
+polars = { version = "0.41.3", features = ["parquet", "lazy"] }
 scraper = "0.17.1"
 serde = "1.0.188"
 thiserror = "1.0.48"
