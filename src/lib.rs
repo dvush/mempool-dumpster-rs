@@ -2,7 +2,7 @@ use indicatif::{ProgressBar, ProgressFinish, ProgressStyle};
 use polars::error::PolarsError;
 use polars::frame::DataFrame;
 use polars::prelude::{
-    col, LazyFrame, NamedFrom, ParquetCompression, ParquetWriter, Series, TakeRandom,
+    col, LazyFrame, NamedFrom, ParquetCompression, ParquetWriter, Series, StatisticsOptions,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -403,7 +403,12 @@ fn write_dataframe_to_parquet(
         Box::new(file)
     };
     ParquetWriter::new(writer)
-        .with_statistics(true)
+        .with_statistics(StatisticsOptions {
+            min_value: true,
+            max_value: true,
+            distinct_count: false,
+            null_count: false,
+        })
         .with_compression(ParquetCompression::Gzip(None))
         .finish(&mut df)?;
 
